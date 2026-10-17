@@ -237,7 +237,7 @@ export class VoicePlayer {
         this.speaking = false;
         if (err) reject(err); else resolve();
       };
-      const guard = setTimeout(() => done(), 30000);
+      const guard = setTimeout(() => { a.pause(); done(); }, 30000);
       this.speaking = true;
       a.onended = () => done();
       a.onerror = () => done(new Error("Couldn't play the agent's voice"));
@@ -297,12 +297,20 @@ export class AnswerRecorder {
       }, 50);
     }
 
+    let finished = false;
+    const cleanup = () => {
+      if (finished) return false;
+      finished = true;
+      clearTimeout(maxTimer);
+      if (poll) clearInterval(poll);
+      if (level) level.close();
+      if (this.recorder === rec) this.recorder = null;
+      return true;
+    };
+
     return new Promise((resolve, reject) => {
       rec.onstop = async () => {
-        clearTimeout(maxTimer);
-        if (poll) clearInterval(poll);
-        if (level) level.close();
-        this.recorder = null;
+        if (!cleanup()) return;
         if (rec.cancelled) { resolve(null); return; }
         const type = (rec.mimeType || mime || "audio/webm").split(";")[0];
         const blob = new Blob(parts, { type });
@@ -312,7 +320,11 @@ export class AnswerRecorder {
           reject(e);
         }
       };
-      rec.onerror = (e) => reject(e.error || new Error("Recording failed"));
+      rec.onerror = (e) => {
+        if (!cleanup()) return;
+        if (rec.state !== "inactive") rec.stop();
+        reject(e.error || new Error("Recording failed"));
+      };
       rec.start(250);
     });
   }

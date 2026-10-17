@@ -21,6 +21,7 @@ let sampler = null;
 let loop = null;
 let wakeLock = null;
 let motionOn = false;
+let fallbackTimer = null;
 
 function setStatus(text) { els.status.textContent = text; }
 
@@ -76,6 +77,7 @@ function safeSet(k, v) { try { localStorage.setItem(k, v); } catch { /* private 
 // ------------------------------------------------------------------ start / stop
 
 async function start() {
+  teardown(); // never stack a second capture on a leftover one
   state = "starting";
   setButton();
   showError("");
@@ -147,7 +149,9 @@ function stop() {
   teardown();
   setStatus("Saving the session and building the report…");
   // Fall back to idle if the report never comes back.
-  setTimeout(() => { if (state === "finishing") finished("Session sent to the laptop."); }, 90000);
+  fallbackTimer = setTimeout(() => {
+    if (state === "finishing") finished("Session sent to the laptop.");
+  }, 90000);
 }
 
 function teardown() {
@@ -165,6 +169,8 @@ function teardown() {
 }
 
 function finished(text) {
+  clearTimeout(fallbackTimer);
+  fallbackTimer = null;
   state = "idle";
   setStatus(text);
   setButton();
@@ -209,6 +215,12 @@ link.on("agent_say", (ev) => {
 });
 
 link.on("report", (ev) => {
+  if (state === "recording") {
+    // The laptop ended this session (e.g. another source started one).
+    teardown();
+    finished("Session ended by the laptop. Press Start to record again.");
+    return;
+  }
   const r = ev.report || {};
   const verdict = { accept: "accepted", review: "sent for review", reject: "rejected" }[r.verdict];
   finished(`Session saved${verdict ? `, ${verdict}` : ""}. See the laptop for the report.`);

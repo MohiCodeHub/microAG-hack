@@ -228,6 +228,7 @@ body.dash {
   background: var(--diverge);
 }
 .conn[data-state="up"]::before { background: var(--ok); }
+.conn[data-state="idle"]::before { background: var(--faint); }
 
 .dash-clock { font-size: 1.6em; font-weight: 700; letter-spacing: 0.02em; }
 

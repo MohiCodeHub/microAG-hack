@@ -380,16 +380,23 @@ function renderSignals(s) {
 
 const watch = new Link(wsUrl("/ws/watch"));
 
-watch.on("link:open", () => {
-  $("conn").dataset.state = "up";
-  $("conn").textContent = "Live";
-});
-watch.on("link:close", () => {
-  $("conn").dataset.state = "down";
-  $("conn").textContent = "Reconnecting";
-});
+let connected = false;
+let session = "none"; // none | live | ended
+
+function renderConn() {
+  const [state, text] = !connected ? ["down", "Reconnecting"]
+    : session === "live" ? ["up", "Live"]
+      : session === "ended" ? ["idle", "Session ended"] : ["idle", "Ready"];
+  $("conn").dataset.state = state;
+  $("conn").textContent = text;
+}
+
+watch.on("link:open", () => { connected = true; renderConn(); });
+watch.on("link:close", () => { connected = false; renderConn(); });
 
 watch.on("session_started", async (ev) => {
+  session = "live";
+  renderConn();
   if (!tasks.has(ev.task.id)) await loadTasks();
   setTask(tasks.get(ev.task.id) || { ...ev.task, steps: [] });
   resetLive();
@@ -413,7 +420,11 @@ watch.on("monitor", (ev) => {
 });
 watch.on("agent_say", onAgentSay);
 watch.on("worker_said", onWorkerSaid);
-watch.on("report", (ev) => renderReport(ev.report || {}));
+watch.on("report", (ev) => {
+  session = "ended";
+  renderConn();
+  renderReport(ev.report || {});
+});
 
 // ------------------------------------------------------------------ video-file mode
 
