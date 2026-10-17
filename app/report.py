@@ -14,6 +14,8 @@ class Divergence:
     question: str
     answer: str | None = None
     explained: bool | None = None
+    follow_up: str | None = None  # the one push-back question, asked when `answer` was vague
+    follow_up_answer: str | None = None
 
 
 def signal_stats(chunks: list[Chunk], divergences: list[Divergence], duplicate_hits: int,

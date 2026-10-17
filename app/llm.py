@@ -192,6 +192,17 @@ Other fields:
 given everything so far. Explained variation lowers it.
 - explained: whether the latest WORKER line plausibly explains the latest divergence you asked \
 about (true/false). null if there is no WORKER answer since the last AGENT question.
+
+Pushing back on an answer (only when the LATEST section says the worker just answered):
+- If the answer plausibly explains what was seen, set explained=true and wake=false.
+- If it is vague, off-topic, contradicts the captions, or leaves out what you need to know \
+(e.g. "this is my drink" when the task is making tea), set explained=false and, if you have not \
+already pushed back on this issue, wake=true with ONE follow-up question asking for the missing \
+context. Be specific to what was seen and what they said (e.g. "Got it - is the drink part of \
+making the tea?"), at most 12 words, friendly, never accusing, and never a repeat of your first \
+question.
+- You get one follow-up per issue. If the two AGENT lines before this answer are your question \
+and your follow-up on the same issue, set wake=false and judge explained from both answers.
 """
 
 REPORT_INSTRUCTIONS = """\
@@ -295,7 +306,7 @@ class LLM:
             latest = "The worker just answered your question (the WORKER line below). " \
                      "Judge `explained` and update your decision."
         else:
-            latest = "A new 10 s chunk was just added (the chunk line below). Update your decision."
+            latest = "A new 5 s chunk was just added (the chunk line below). Update your decision."
         text = (
             _context_prefix(task, references)
             + "=== SESSION TIMELINE (so far)\n" + "\n".join(lines[:-1]) + "\n\n"

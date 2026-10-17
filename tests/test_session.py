@@ -253,6 +253,55 @@ async def test_answer_marks_divergence_explained(tmp_path):
     assert len(h.of("agent_say")) == 2
 
 
+def pushback_llm(second_explained=False):
+    """Wakes on chunks; first answer is vague (follow-up), second answer is judged."""
+    answers = {"n": 0}
+
+    def monitor(trigger, tl):
+        if trigger == "worker_answer":
+            answers["n"] += 1
+            if answers["n"] == 1:
+                return decision(status="diverge", divergence_type="wrong_task", explained=False,
+                                wake=True, question="Is the drink part of making tea?")
+            return decision(explained=second_explained, wake=True, question="Anything else?")
+        return decision(status="diverge", divergence_type="wrong_task", reason="cans",
+                        wake=True, question="What are you working on?")
+    return FakeLLM(monitor=monitor)
+
+
+async def test_vague_answer_gets_one_immediate_follow_up(tmp_path):
+    h = Harness(tmp_path, llm=pushback_llm(), voice=FakeVoice(stt_text="my drink here"))
+    await h.chunk()
+    await h.session.add_answer(b"audio", "audio/webm")
+    says = h.of("agent_say")
+    assert [s["text"] for s in says] == ["What are you working on?",
+                                         "Is the drink part of making tea?"]
+    assert says[1]["kind"] == "question" and says[1]["follow_up"] is True
+    assert h.session.pending  # waiting for the follow-up answer, despite the question cooldown
+    [d] = h.session.divergences
+    assert d.answer == "my drink here" and d.follow_up == "Is the drink part of making tea?"
+    assert d.explained is None
+
+
+async def test_follow_up_answer_settles_the_divergence_without_a_third_question(tmp_path):
+    h = Harness(tmp_path, llm=pushback_llm(second_explained=True),
+                voice=FakeVoice(stt_text="yes, tea after"))
+    await h.chunk()
+    await h.session.add_answer(b"audio", "audio/webm")
+    await h.session.add_answer(b"audio", "audio/webm")
+    assert len(h.of("agent_say")) == 2  # no push-back on the follow-up
+    [d] = h.session.divergences
+    assert d.follow_up_answer == "yes, tea after" and d.explained is True
+    assert not h.session.pending
+
+
+async def test_explained_answer_gets_no_follow_up(tmp_path):
+    h = Harness(tmp_path, llm=waking_llm(explained=True), voice=FakeVoice(stt_text="kettle"))
+    await h.chunk()
+    await h.session.add_answer(b"audio", "audio/webm")
+    assert len(h.of("agent_say")) == 1
+
+
 async def test_empty_stt_records_no_answer(tmp_path):
     h = Harness(tmp_path, llm=waking_llm(explained=False), voice=FakeVoice(stt_text=""))
     await h.chunk()

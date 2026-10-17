@@ -235,7 +235,7 @@ function agentTime() {
 
 function onAgentSay(ev) {
   const question = ev.kind === "question";
-  const who = question ? "Agent asks" : "Agent reminds";
+  const who = !question ? "Agent reminds" : ev.follow_up ? "Agent follows up" : "Agent asks";
   appendTimeline(h("li", { class: `tl tl-agent${question ? "" : " is-nudge"}` },
     h("time", {}, mmss(agentTime())),
     h("div", { class: "tl-body" }, h("p", { class: "tl-who" }, who),
@@ -313,10 +313,17 @@ function renderReport(r) {
         h("span", { class: "div-type" }, DIVERGENCE[d.type] || "Divergence"),
         h("span", { class: "badge", "data-level": status[0] }, status[1])),
       h("p", { class: "div-q" }, `“${d.question}”`),
-      h("p", { class: "div-a" }, d.answer && d.answer !== "(no answer)"
-        ? `Worker: “${d.answer}”` : "No answer"));
+      h("p", { class: "div-a" }, answerText(d.answer)),
+      ...(d.follow_up ? [
+        h("p", { class: "div-q" }, `Follow-up: “${d.follow_up}”`),
+        h("p", { class: "div-a" }, answerText(d.follow_up_answer)),
+      ] : []));
   }));
   if (!divergences.length) $("divlist").append(h("li", { class: "muted" }, "The agent didn't need to ask anything."));
+}
+
+function answerText(a) {
+  return a && a !== "(no answer)" ? `Worker: “${a}”` : "No answer";
 }
 
 function renderSegbar(segments, divergences, hitsSegment) {

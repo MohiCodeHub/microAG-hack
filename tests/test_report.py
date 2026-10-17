@@ -51,7 +51,8 @@ def test_fraud_score_blends_model_and_rule():
     r = build_report(model, stats, [d], "")
     assert r["fraud_score"] == round(0.5 * 61 + 0.5 * 20)
     assert r["divergences"] == [{"t": 10, "type": "idle", "reason": "r", "question": "q",
-                                 "answer": "a", "explained": True}]
+                                 "answer": "a", "explained": True,
+                                 "follow_up": None, "follow_up_answer": None}]
 
 
 def test_model_fraud_score_is_clamped_to_0_100():

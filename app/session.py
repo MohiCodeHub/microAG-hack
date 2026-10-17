@@ -111,14 +111,27 @@ class Session:
         t = self._line_t
         self.timeline.add_worker(t, text)
         await self._emit({"type": "worker_said", "t": t, "text": text})
+        first_answer = d is not None and d.follow_up is None
         if d:
-            d.answer = text
+            if first_answer:
+                d.answer = text
+            else:
+                d.follow_up_answer = text
         decision = await self._monitor("worker_answer")
-        if d:
-            d.explained = decision.explained
-            if self._open is d:
-                self._open = None
-                self.pending = False
+        if not d:
+            return
+        follow_up = decision.question.strip() if decision.wake else ""
+        if (first_answer and decision.explained is False and follow_up and text != NO_ANSWER
+                and not self._finishing and self._open is d):
+            # Push back once: the answer didn't explain what was seen, so ask for the missing
+            # context now, while it is fresh. The question gap doesn't apply to a follow-up.
+            d.follow_up = follow_up
+            await self._speak_question(d, follow_up, follow_up=True)
+            return
+        d.explained = decision.explained
+        if self._open is d:
+            self._open = None
+            self.pending = False
 
     async def wait_idle(self) -> None:
         """Wait until every spawned chunk has been captioned and monitored."""
@@ -283,12 +296,16 @@ class Session:
         d = Divergence(t=t, type=decision.divergence_type, reason=decision.reason,
                        question=question)
         self.divergences.append(d)
+        await self._speak_question(d, question, follow_up=False)
+
+    async def _speak_question(self, d: Divergence, question: str, follow_up: bool) -> None:
+        self._wake.record_question(self.clock())
         self._open = d
         self.pending = True
-        self.timeline.add_agent(t, question)
+        self.timeline.add_agent(self._line_t, question)
         audio = await self._tts(question)
         await self._emit({"type": "agent_say", "kind": "question", "text": question,
-                          "audio_b64": _b64(audio)})
+                          "audio_b64": _b64(audio), "follow_up": follow_up})
         if self._open is d:
             self._timeout_task = asyncio.create_task(self._answer_timeout(d))
 
