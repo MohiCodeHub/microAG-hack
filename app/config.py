@@ -11,8 +11,8 @@ from dotenv import load_dotenv
 class Settings:
     openai_api_key: str = ""
     elevenlabs_api_key: str = ""
-    elevenlabs_voice_id: str = ""
-    elevenlabs_stt_model: str = "scribe_v1"
+    elevenlabs_voice_id: str = "hpp4J3VqNfWAUOO0d1Us"
+    elevenlabs_stt_model: str = "scribe_v2"
     caption_model: str = "gpt-5.6-luna"
     monitor_model: str = "gpt-5.6-luna"
     tasks_dir: Path = field(default_factory=lambda: Path("tasks"))
@@ -31,7 +31,7 @@ def get_settings() -> Settings:
     return Settings(
         openai_api_key=env("OPENAI_API_KEY", ""),
         elevenlabs_api_key=env("ELEVENLABS_API_KEY", ""),
-        elevenlabs_voice_id=env("ELEVENLABS_VOICE_ID", ""),
-        elevenlabs_stt_model=env("ELEVENLABS_STT_MODEL", "scribe_v1"),
+        elevenlabs_voice_id=env("ELEVENLABS_VOICE_ID", "hpp4J3VqNfWAUOO0d1Us"),
+        elevenlabs_stt_model=env("ELEVENLABS_STT_MODEL", "scribe_v2"),
         monitor_model=env("MONITOR_MODEL", "gpt-5.6-luna"),
     )
