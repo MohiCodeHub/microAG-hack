@@ -22,6 +22,7 @@ let loop = null;
 let wakeLock = null;
 let motionOn = false;
 let fallbackTimer = null;
+let sessionId = null; // the session this phone started; events of any other are ignored
 
 function setStatus(text) { els.status.textContent = text; }
 
@@ -78,6 +79,7 @@ function safeSet(k, v) { try { localStorage.setItem(k, v); } catch { /* private 
 
 async function start() {
   teardown(); // never stack a second capture on a leftover one
+  sessionId = null;
   state = "starting";
   setButton();
   showError("");
@@ -208,13 +210,19 @@ document.addEventListener("visibilitychange", () => {
 
 // ------------------------------------------------------------------ server events
 
+link.on("session_started", (ev) => {
+  // Only ever a reply to our own start (also after a reconnect).
+  if (state === "starting" || state === "recording") sessionId = ev.session_id;
+});
+
 link.on("agent_say", (ev) => {
-  if (state !== "recording") return;
+  if (state !== "recording" || ev.session_id !== sessionId) return;
   showAgent(ev.kind === "question" ? "Agent asks" : "Agent", ev.text);
   if (loop) loop.handle(ev);
 });
 
 link.on("report", (ev) => {
+  if (ev.session_id !== sessionId) return; // a late report from a session we already left
   if (state === "recording") {
     // The laptop ended this session (e.g. another source started one).
     teardown();

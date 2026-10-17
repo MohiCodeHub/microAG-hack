@@ -9,6 +9,13 @@ log = logging.getLogger(__name__)
 BASE = "https://api.elevenlabs.io/v1"
 TTS_MODEL = "eleven_flash_v2_5"
 TIMEOUT_S = 15
+# The STT service infers the container from the upload's filename extension.
+AUDIO_EXT = {"audio/webm": "webm", "audio/mp4": "mp4", "audio/mpeg": "mp3", "audio/ogg": "ogg"}
+
+
+def audio_filename(mime: str) -> str:
+    base = (mime or "").split(";")[0].strip().lower()
+    return f"answer.{AUDIO_EXT.get(base, 'webm')}"
 
 
 class Voice:
@@ -36,7 +43,7 @@ class Voice:
             r = await self.http.post(
                 f"{BASE}/speech-to-text",
                 headers={"xi-api-key": self.api_key},
-                files={"file": ("audio", audio, mime)},
+                files={"file": (audio_filename(mime), audio, mime)},
                 data={"model_id": self.stt_model},
                 timeout=TIMEOUT_S,
             )

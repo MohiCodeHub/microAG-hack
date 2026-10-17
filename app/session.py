@@ -24,7 +24,7 @@ from typing import Any
 from app.llm import CAPTION_FALLBACK, MonitorDecision
 from app.policy import NudgePolicy, WakePolicy
 from app.report import Divergence, build_report, signal_stats
-from app.signals import HashStore, imu_energy, imu_mismatch, visual_motion
+from app.signals import HashStore, frame_hash, imu_energy, imu_mismatch, visual_motion
 from app.tasks import Task, candidate_steps
 from app.timeline import Chunk, Timeline, fmt
 
@@ -33,9 +33,13 @@ log = logging.getLogger(__name__)
 NUDGE_TEXT = "Keep your hands in view, please."
 NO_ANSWER = "(no answer)"
 MIN_PARTIAL_FRAMES = 3  # a trailing partial chunk is captioned at finish if it has this many
-# Duplicate footage: consecutive chunks must match the same earlier session with its source
-# time advancing like ours (normally 10 s), within this tolerance.
+# Duplicate footage: two consecutive chunks of ours must match the same consecutive pair of
+# chunks (j, j+1) of one earlier session, with its source time advancing like ours (normally
+# 10 s) within this tolerance.
 DUP_TOLERANCE_S = 4.0
+# Our own consecutive keyframes closer than this (pHash bits) mean a static view. A static view
+# repeated across sessions (same room, camera at rest) is not evidence of recycled footage.
+STATIC_SCENE_DISTANCE = 6
 
 Frame = tuple[float, bytes]
 
@@ -77,7 +81,7 @@ class Session:
 
         self._line_t = 0.0  # stamp for AGENT / WORKER lines (see module docstring)
         self._last_index = -1
-        self._prev_matches: tuple[int, float, list[dict]] | None = None
+        self._prev_key: tuple | None = None  # (index, t, hash, matches) of the last keyframe
         self._open: Divergence | None = None
         self._timeout_task: asyncio.Task | None = None
         self._finishing = False
@@ -123,10 +127,19 @@ class Session:
         await self._queue.join()
 
     async def finish(self) -> dict:
+        """Build the report. Waits at most ``settings.finish_timeout_s`` for in-flight chunks;
+        chunks still unfinished then are left out of the report."""
         self._finishing = True
+        await self._emit({"type": "session_ending"})
         if len(self._frames) >= MIN_PARTIAL_FRAMES:
             self._spawn_chunk()
-        await self.wait_idle()
+        try:
+            await asyncio.wait_for(self.wait_idle(), self.settings.finish_timeout_s)
+        except TimeoutError:
+            log.warning("finish: chunks still in flight after %.0f s; reporting without them",
+                        self.settings.finish_timeout_s)
+            for task in list(self._caption_tasks):
+                task.cancel()
         if self._timeout_task:
             self._timeout_task.cancel()
             self._timeout_task = None
@@ -217,24 +230,32 @@ class Session:
         await self._emit({"type": "chunk", "chunk": asdict(chunk), "signals": signals})
 
         now = self.clock()
-        if not self._finishing and self._nudge.should_nudge(now, chunk.hands_visible):
+        nudged = not self._finishing and self._nudge.should_nudge(now, chunk.hands_visible)
+        if nudged:
             await self._say_nudge()
 
         decision = await self._monitor("chunk")
         question = decision.question.strip()
-        if (decision.wake and question and not self._finishing
+        # Never stack a question on the nudge that just played; the monitor can ask next chunk.
+        if (decision.wake and question and not self._finishing and not nudged
                 and self._wake.can_ask(now, self.pending)):
             await self._ask(now, decision, question)
 
     def _duplicate_match(self, index: int, t: float, jpeg: bytes) -> dict | None:
-        matches = sorted(self.hashes.check_and_add(self.id, t, jpeg), key=lambda m: m["distance"])
-        prev, self._prev_matches = self._prev_matches, (index, t, matches)
+        h = frame_hash(jpeg)
+        if h is None:  # low-texture frame: no identity to match
+            self._prev_key = None
+            return None
+        matches = self.hashes.check_and_add(self.id, index, t, h)
+        prev, self._prev_key = self._prev_key, (index, t, h, matches)
         if prev is None or prev[0] != index - 1:
             return None
+        if h - prev[2] <= STATIC_SCENE_DISTANCE:  # static view: matching proves nothing
+            return None
         step = t - prev[1]
-        for m in matches:
-            for p in prev[2]:
-                if (m["session_id"] == p["session_id"]
+        for m in sorted(matches, key=lambda m: m["distance"]):
+            for p in prev[3]:
+                if (m["session_id"] == p["session_id"] and m["index"] == p["index"] + 1
                         and abs((m["t"] - p["t"]) - step) <= DUP_TOLERANCE_S):
                     return m
         return None
@@ -248,9 +269,12 @@ class Session:
                                                   trigger)
             except Exception as e:  # noqa: BLE001
                 log.warning("monitor failed: %r", e)
-                decision = MonitorDecision.default()
-        await self._emit({"type": "monitor", "index": self._last_index,
-                          "decision": asdict(decision)})
+                decision = MonitorDecision.unavailable()
+        fields = asdict(decision)
+        fallback = fields.pop("fallback")
+        # fallback: the decision is a neutral stand-in, so clients keep their last status.
+        await self._emit({"type": "monitor", "index": self._last_index, "decision": fields,
+                          "fallback": fallback})
         return decision
 
     async def _ask(self, now: float, decision: MonitorDecision, question: str) -> None:

@@ -83,6 +83,75 @@ def test_session_started_carries_id_and_task(tmp_path):
         assert ev["session_id"] and ev["task"]["id"] == "example_make_tea"
 
 
+def test_events_carry_the_session_id(tmp_path):
+    with make_client(tmp_path) as c, c.websocket_connect("/ws/watch") as watch, \
+            c.websocket_connect("/ws/source") as src:
+        src.send_json({"type": "start", "task_id": "example_make_tea"})
+        started = watch.receive_json()
+        sid = started["session_id"]
+        assert src.receive_json() == started  # the source learns its session id too
+        for t in range(10):
+            src.send_json({"type": "frame", "t": t, "jpeg_b64": jpeg_b64()})
+        src.send_json({"type": "stop"})
+        seen = []
+        while not seen or seen[-1]["type"] != "report":
+            seen.append(watch.receive_json())
+        assert {"frame", "chunk", "monitor", "session_ending", "report"} <= {e["type"] for e in seen}
+        assert all(e["session_id"] == sid for e in seen)
+        assert src.receive_json()["session_id"] == sid
+
+
+def test_late_watcher_gets_session_started_and_chunks_so_far(tmp_path):
+    with make_client(tmp_path) as c, c.websocket_connect("/ws/watch") as early, \
+            c.websocket_connect("/ws/source") as src:
+        src.send_json({"type": "start", "task_id": "example_make_tea"})
+        sid = early.receive_json()["session_id"]
+        for t in range(10):
+            src.send_json({"type": "frame", "t": t, "jpeg_b64": jpeg_b64()})
+        while early.receive_json()["type"] != "chunk":
+            pass
+        with c.websocket_connect("/ws/watch") as late:
+            first, second = late.receive_json(), late.receive_json()
+        assert first["type"] == "session_started" and first["session_id"] == sid
+        assert first["task"] == {"id": "example_make_tea", "name": "Make a cup of tea"}
+        assert second["type"] == "chunk" and second["session_id"] == sid
+        assert second["chunk"]["caption"] == "fills kettle"
+
+
+class SlowReportLLM(FakeLLM):
+    async def final_report(self, task, references, timeline):
+        await asyncio.sleep(0.5)
+        return await super().final_report(task, references, timeline)
+
+
+def test_watcher_joining_while_the_report_is_built_still_gets_it(tmp_path):
+    app = create_app(Settings(data_dir=tmp_path / "data"), llm_factory=lambda s: SlowReportLLM(),
+                     voice_factory=lambda s, http: FakeVoice())
+    with TestClient(app) as c, c.websocket_connect("/ws/source") as src:
+        src.send_json({"type": "start", "task_id": "example_make_tea"})
+        sid = src.receive_json()["session_id"]
+        src.send_json({"type": "stop"})
+        with c.websocket_connect("/ws/watch") as late:
+            seen = [late.receive_json()]
+            while seen[-1]["type"] != "report":
+                seen.append(late.receive_json())
+        assert seen[0]["type"] == "session_started" and seen[0]["session_id"] == sid
+        assert "session_ending" in [e["type"] for e in seen]
+        assert seen[-1]["session_id"] == sid
+
+
+def test_missing_api_keys_are_logged_at_startup(tmp_path, caplog):
+    with caplog.at_level("WARNING", logger="app.server"):
+        create_app(Settings(data_dir=tmp_path / "data"))
+    text = caplog.text
+    assert "OPENAI_API_KEY" in text and "ELEVENLABS_API_KEY" in text
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="app.server"):
+        create_app(Settings(data_dir=tmp_path / "data", openai_api_key="k",
+                            elevenlabs_api_key="k"))
+    assert "API_KEY" not in caplog.text
+
+
 def test_unknown_task_returns_error(tmp_path):
     with make_client(tmp_path) as c, c.websocket_connect("/ws/source") as src:
         src.send_json({"type": "start", "task_id": "nope"})
@@ -97,6 +166,7 @@ def test_stop_emits_report_to_source_and_watch(tmp_path):
         for t in range(10):
             src.send_json({"type": "frame", "t": t, "jpeg_b64": jpeg_b64()})
         src.send_json({"type": "stop"})
+        assert src.receive_json()["type"] == "session_started"
         assert src.receive_json()["type"] == "report"
         seen = []
         while not seen or seen[-1] != "report":
@@ -111,9 +181,11 @@ def test_answer_reaches_watch_and_start_finishes_old_session(tmp_path):
         src.send_json({"type": "answer", "audio_b64": base64.b64encode(b"x").decode(),
                        "mime": "audio/webm"})
         src.send_json({"type": "start", "task_id": "example_make_tea"})
-        seen = [watch.receive_json()["type"] for _ in range(5)]
-        assert seen == ["session_started", "worker_said", "monitor", "report", "session_started"]
-        assert src.receive_json()["type"] == "report"
+        seen = [watch.receive_json()["type"] for _ in range(6)]
+        assert seen == ["session_started", "worker_said", "monitor", "session_ending", "report",
+                        "session_started"]
+        assert [src.receive_json()["type"] for _ in range(3)] == [
+            "session_started", "report", "session_started"]
 
 
 def test_dead_watcher_does_not_break_session(tmp_path):
@@ -122,6 +194,7 @@ def test_dead_watcher_does_not_break_session(tmp_path):
             pass
         src.send_json({"type": "start", "task_id": "example_make_tea"})
         src.send_json({"type": "stop"})
+        assert src.receive_json()["type"] == "session_started"
         assert src.receive_json()["type"] == "report"
 
 
@@ -154,6 +227,7 @@ def test_invalid_json_and_binary_do_not_end_session(tmp_path):
     with make_client(tmp_path) as c, c.websocket_connect("/ws/watch") as watch, \
             c.websocket_connect("/ws/source") as src:
         src.send_json({"type": "start", "task_id": "example_make_tea"})
+        assert src.receive_json()["type"] == "session_started"
         src.send_text("not json")
         assert src.receive_json()["type"] == "error"
         src.send_bytes(b"\x00\x01")

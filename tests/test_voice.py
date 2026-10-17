@@ -1,6 +1,7 @@
 import json
 
 import httpx
+import pytest
 
 from app.voice import Voice
 
@@ -38,6 +39,22 @@ async def test_stt_returns_text():
     assert seen["url"] == "https://api.elevenlabs.io/v1/speech-to-text"
     assert b'name="model_id"' in seen["body"] and b"scribe_v2" in seen["body"]
     assert b'name="file"' in seen["body"] and b"audio-bytes" in seen["body"]
+
+
+@pytest.mark.parametrize("mime, filename", [
+    ("audio/webm;codecs=opus", "answer.webm"), ("audio/mp4", "answer.mp4"),
+    ("audio/mpeg", "answer.mp3"), ("audio/ogg; codecs=opus", "answer.ogg"),
+    ("audio/x-unknown", "answer.webm"), ("", "answer.webm"),
+])
+async def test_stt_filename_extension_follows_mime(mime, filename):
+    seen = {}
+
+    def handler(req: httpx.Request):
+        seen["body"] = req.content
+        return httpx.Response(200, json={"text": "ok"})
+
+    await mk(handler).stt(b"audio-bytes", mime)
+    assert f'name="file"; filename="{filename}"'.encode() in seen["body"]
 
 
 async def test_stt_returns_empty_on_500():

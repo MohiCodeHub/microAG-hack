@@ -43,6 +43,8 @@ def build_report(model: dict, stats: dict, divergences: list[Divergence], timeli
     """Merge the model's report with deterministic signals into the final report."""
     rule = rule_score(stats)
     model_score = model.get("fraud_score")
+    if model_score is not None:
+        model_score = max(0, min(100, model_score))
     fraud = rule if model_score is None else round(0.5 * model_score + 0.5 * rule)
     return {
         **model,

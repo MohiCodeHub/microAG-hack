@@ -17,17 +17,30 @@ from openai import AsyncOpenAI
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import get_settings  # noqa: E402
-from app.llm import LLM  # noqa: E402
+from app.llm import CAPTION_FALLBACK, LLM  # noqa: E402
 from app.tasks import candidate_steps, load_library  # noqa: E402
-from app.timeline import Chunk, Timeline  # noqa: E402
+from app.timeline import Chunk, Timeline, fmt  # noqa: E402
 
 CHUNK_FRAMES = 10
 MIN_PARTIAL_FRAMES = 3
 
 
+def _jpeg(frame: av.VideoFrame, width: int) -> bytes:
+    img = frame.to_image()
+    img = img.resize((width, max(1, round(img.height * width / img.width))))
+    buf = BytesIO()
+    img.convert("RGB").save(buf, "JPEG", quality=80)
+    return buf.getvalue()
+
+
 def sample_frames(path: Path, fps: int = 1, width: int = 512) -> list[tuple[float, bytes]]:
-    """Decode `path`, keeping the frame nearest each sample tick (1/fps s); returns (t, jpeg)."""
-    best: dict[int, tuple[float, av.VideoFrame]] = {}
+    """Decode `path`, keeping the frame nearest each sample tick (1/fps s); returns (t, jpeg).
+
+    Only the current tick's best candidate is held at full resolution: once decoding moves past
+    a tick, its frame is final and is converted to a resized JPEG straight away.
+    """
+    pending: dict[int, tuple[float, av.VideoFrame]] = {}
+    done: dict[int, tuple[float, bytes]] = {}
     last_t = 0.0
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
@@ -37,19 +50,17 @@ def sample_frames(path: Path, fps: int = 1, width: int = 512) -> list[tuple[floa
             t = float(frame.pts * stream.time_base)
             last_t = max(last_t, t)
             tick = round(t * fps)
-            if tick not in best or abs(t - tick / fps) < abs(best[tick][0] - tick / fps):
-                best[tick] = (t, frame)
-    out: list[tuple[float, bytes]] = []
-    for tick in sorted(best):
-        if tick / fps > last_t:  # tick lies past the end of the video
-            continue
-        t, frame = best[tick]
-        img = frame.to_image()
-        img = img.resize((width, max(1, round(img.height * width / img.width))))
-        buf = BytesIO()
-        img.convert("RGB").save(buf, "JPEG", quality=80)
-        out.append((t, buf.getvalue()))
-    return out
+            if tick in done:  # out-of-order straggler for a finished tick
+                continue
+            if tick not in pending or abs(t - tick / fps) < abs(pending[tick][0] - tick / fps):
+                pending[tick] = (t, frame)
+            for k in [k for k in pending if k < tick]:
+                kt, kframe = pending.pop(k)
+                done[k] = (kt, _jpeg(kframe, width))
+        for k, (kt, kframe) in pending.items():
+            done[k] = (kt, _jpeg(kframe, width))
+    # A tick past the end of the video has only an earlier frame as its "nearest".
+    return [done[tick] for tick in sorted(done) if tick / fps <= last_t]
 
 
 def group_chunks(frames: list, size: int = CHUNK_FRAMES) -> list[list]:
@@ -67,6 +78,16 @@ async def build_timeline(llm: LLM, task, steps, frames) -> Timeline:
         prev = res["caption"]
         tl.add_chunk(Chunk(index=i, t_start=group[0][0], t_end=group[-1][0] + 1.0, **res))
     return tl
+
+
+def warn_failed_captions(name: str, tl: Timeline) -> list[int]:
+    """Print a warning naming every chunk the captioner failed on; returns their indices."""
+    failed = [c for c in tl.chunks if c.caption == CAPTION_FALLBACK["caption"]]
+    if failed:
+        spans = ", ".join(f"{fmt(c.t_start)}–{fmt(c.t_end)}" for c in failed)
+        print(f"warning: {name}: caption unavailable for {len(failed)} chunk(s): {spans}. "
+              "Rebuild with --force once the captioner works.", file=sys.stderr)
+    return [c.index for c in failed]
 
 
 async def run(task_id: str, force: bool, tasks_dir: Path) -> None:
@@ -93,6 +114,7 @@ async def run(task_id: str, force: bool, tasks_dir: Path) -> None:
         tl = await build_timeline(llm, task, steps, frames)
         out.write_text(json.dumps(tl.to_json(), indent=2))
         print(f"{v.name}: {len(frames)} frames, {len(tl.chunks)} chunks -> {out.name}")
+        warn_failed_captions(v.name, tl)
 
 
 def main(argv: list[str] | None = None, tasks_dir: Path | None = None) -> None:

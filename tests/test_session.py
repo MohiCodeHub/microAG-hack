@@ -9,7 +9,7 @@ from PIL import Image
 from app.config import Settings
 from app.llm import CAPTION_FALLBACK, MonitorDecision
 from app.session import NUDGE_TEXT, Session
-from app.signals import HashStore
+from app.signals import HashStore, frame_hash
 from app.tasks import Step, Task
 
 TASK = Task("tea", "Make tea", [Step("fill_kettle", "Fill the kettle"), Step("boil", "Boil water")])
@@ -204,6 +204,17 @@ async def test_hands_none_triggers_nudge_without_monitor_wake(tmp_path):
     assert h.session.divergences == []
 
 
+async def test_no_question_in_the_chunk_a_nudge_just_played(tmp_path):
+    llm = FakeLLM(caption=lambda i, n: cap(hands_visible="none" if i == 0 else "both"),
+                  monitor=lambda trig, tl: decision(status="diverge", wake=True, question="Hm?"))
+    h = Harness(tmp_path, llm=llm)
+    await h.chunk()
+    assert [s["kind"] for s in h.of("agent_say")] == ["nudge"]
+    assert h.session.divergences == []
+    await h.chunk()  # no nudge this time, so the monitor may ask
+    assert [s["kind"] for s in h.of("agent_say")] == ["nudge", "question"]
+
+
 async def test_nudge_tts_failure_retries_next_time(tmp_path):
     voice = FakeVoice(tts_fail=True)
     h = Harness(tmp_path, llm=FakeLLM(caption=lambda i, n: cap(hands_visible="none")), voice=voice)
@@ -293,20 +304,66 @@ async def test_recapture_and_imu_mismatch_tags(tmp_path):
 
 async def test_duplicate_tag_needs_two_consecutive_advancing_matches(tmp_path):
     store = HashStore(tmp_path / "hashes.json")
-    a, b, c = jpeg(101), jpeg(102), jpeg(103)
-    store.check_and_add("old", 65.0, a)
-    store.check_and_add("old", 75.0, b)
-    store.check_and_add("old", 200.0, c)
+    a, b, c, d = jpeg(101), jpeg(102), jpeg(103), jpeg(104)
+    store.check_and_add("old", 6, 65.0, frame_hash(a))
+    store.check_and_add("old", 7, 75.0, frame_hash(b))
+    store.check_and_add("old", 9, 85.0, frame_hash(c))   # time advances, but not chunk 8
+    store.check_and_add("old", 20, 200.0, frame_hash(d))
     h = Harness(tmp_path, hashes=store)
     await h.chunk(frames=[a] * 10)   # single match: ignored
-    await h.chunk(frames=[b] * 10)   # advanced 10 s in "old": duplicate
-    await h.chunk(frames=[c] * 10)   # matches "old" but jumps 125 s: ignored
+    await h.chunk(frames=[b] * 10)   # old chunk 6 then 7, 10 s later: duplicate
+    await h.chunk(frames=[c] * 10)   # old chunk 7 then 9: not the same consecutive pair
+    await h.chunk(frames=[d] * 10)   # matches "old" but jumps 115 s: ignored
     caps = [e["chunk"]["caption"] for e in h.of("chunk")]
     assert caps[0] == "fills kettle"
     assert caps[1] == "fills kettle [duplicate of old 01:15]"
-    assert caps[2] == "fills kettle"
+    assert caps[2:] == ["fills kettle", "fills kettle"]
     report = await h.session.finish()
     assert report["signals"]["duplicate_hits"] == 1
+
+
+def static_scene(seed: int) -> bytes:
+    """The same textured view each time, with a little sensor noise (pHash moves 0-4 bits)."""
+    base = (np.random.default_rng(7).random((8, 8)) * 255).astype(np.uint8)
+    img = np.asarray(Image.fromarray(base).resize((128, 128), Image.BILINEAR), dtype=np.float32)
+    noise = np.random.default_rng(seed).normal(0, 14.0, img.shape)
+    buf = io.BytesIO()
+    Image.fromarray(np.clip(img + noise, 0, 255).astype(np.uint8)).save(buf, "JPEG")
+    return buf.getvalue()
+
+
+async def run_session(tmp_path, store, session_id, chunks):
+    h = Harness(tmp_path, hashes=store, session_id=session_id)
+    for frames in chunks:
+        await h.chunk(frames=frames)
+    return [e["chunk"]["caption"] for e in h.of("chunk")]
+
+
+async def test_honest_static_scene_repeat_is_not_a_duplicate(tmp_path):
+    store = HashStore(tmp_path / "hashes.json")
+    for n, sid in enumerate(["rehearsal1", "rehearsal2", "live"]):
+        caps = await run_session(tmp_path, store, sid, [
+            [static_scene(100 * n + 10 * k + i) for i in range(10)] for k in range(5)])
+        assert not any("[duplicate of" in c for c in caps), (sid, caps)
+
+
+async def test_true_replay_of_earlier_footage_is_flagged(tmp_path):
+    store = HashStore(tmp_path / "hashes.json")
+    footage = [[jpeg(200 + 10 * k + i) for i in range(10)] for k in range(4)]
+    assert not any("[duplicate of" in c for c in await run_session(tmp_path, store, "old", footage))
+    caps = await run_session(tmp_path, store, "replay", footage)
+    assert caps[0] == "fills kettle"
+    assert caps[1:] == [f"fills kettle [duplicate of old {t}]" for t in ("00:15", "00:25", "00:35")]
+
+
+async def test_low_texture_frames_never_flag_duplicate(tmp_path):
+    flat = io.BytesIO()
+    Image.new("L", (128, 128), 120).save(flat, "JPEG")
+    footage = [[flat.getvalue()] * 10 for _ in range(3)]
+    store = HashStore(tmp_path / "hashes.json")
+    await run_session(tmp_path, store, "old", footage)
+    caps = await run_session(tmp_path, store, "new", footage)
+    assert not any("[duplicate of" in c for c in caps)
 
 
 async def test_finish_builds_and_emits_report(tmp_path):
@@ -319,6 +376,40 @@ async def test_finish_builds_and_emits_report(tmp_path):
     assert report["fraud_score"] == 40  # round(0.5*40 + 0.5*40)
     assert report["timeline"] == "00:00–00:10 fills kettle [fill_kettle]"
     assert h.of("report") == [{"type": "report", "report": report}]
+
+
+async def test_monitor_event_marks_fallback_decisions(tmp_path):
+    def monitor(trig, tl):
+        if len(tl.chunks) == 2:
+            raise RuntimeError("monitor down")
+        return decision(status="watch", progress=0.5)
+
+    h = Harness(tmp_path, llm=FakeLLM(monitor=monitor))
+    await h.chunk()
+    await h.chunk()
+    ok, failed = h.of("monitor")
+    assert ok["fallback"] is False and ok["decision"]["status"] == "watch"
+    assert failed["fallback"] is True
+    assert "fallback" not in failed["decision"]
+
+
+async def test_finish_is_bounded_when_a_caption_hangs(tmp_path):
+    hang = asyncio.Event()
+
+    async def caption(i, n):
+        if i == 1:
+            await hang.wait()  # never set
+        return cap()
+
+    h = Harness(tmp_path, llm=FakeLLM(caption=caption), settings=Settings(finish_timeout_s=0.2))
+    await h.chunk()
+    for t in range(10, 20):
+        await h.session.add_frame(float(t), GRAY)
+    report = await asyncio.wait_for(h.session.finish(), 3)
+    assert report["timeline"] == "00:00–00:10 fills kettle [fill_kettle]"
+    types = [e["type"] for e in h.events]
+    assert types.index("session_ending") < types.index("report")
+    assert types.count("session_ending") == 1
 
 
 async def test_finish_with_pending_question_marks_unexplained(tmp_path):

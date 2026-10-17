@@ -69,3 +69,21 @@ async def test_build_timeline_spans_and_prev_caption():
     assert [(c.t_start, c.t_end) for c in tl.chunks] == [(0.0, 10.0), (10.0, 20.0), (20.0, 23.0)]
     assert llm.prevs == [None, "c1", "c2"]
     assert tl.render().splitlines()[0].startswith("00:00–00:10 ")
+
+
+def test_failed_captions_are_listed(capsys):
+    from app.llm import CAPTION_FALLBACK
+    from app.timeline import Chunk, Timeline
+
+    tl = Timeline()
+    for i, caption in enumerate(["fills kettle", CAPTION_FALLBACK["caption"], "pours",
+                                 CAPTION_FALLBACK["caption"]]):
+        tl.add_chunk(Chunk(index=i, t_start=i * 10.0, t_end=i * 10.0 + 10, caption=caption,
+                           step="other", confidence=0.0, objects=[], hands_visible="both",
+                           activity="active", recapture_suspected=False))
+    assert build_refs.warn_failed_captions("a.mp4", tl) == [1, 3]
+    err = capsys.readouterr().err
+    assert "a.mp4" in err and "00:10–00:20" in err and "00:30–00:40" in err
+    tl.chunks = tl.chunks[:1]
+    assert build_refs.warn_failed_captions("a.mp4", tl) == []
+    assert capsys.readouterr().err == ""

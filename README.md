@@ -35,10 +35,29 @@ Captions each reference MP4 and writes `<name>.timeline.json` beside it. Existin
 scripts/run.sh
 ```
 
-It generates a self-signed certificate on first run, then prints two URLs:
+It makes a self-signed certificate for the laptop's LAN IP (again whenever that IP changes, e.g. on a new Wi-Fi), then prints two URLs:
 
 - Phone page: `https://<laptop-ip>:8443/phone`. Open it on the phone (same Wi-Fi) and accept the self-signed certificate warning, otherwise camera and microphone access is blocked.
 - Dashboard: `https://localhost:8443/` on the laptop.
+
+The IP is taken from the first of `en0`, `en1`, … that has one. To pick it yourself: `LAN_IP=192.168.1.23 scripts/run.sh`.
+
+The server prints a warning at startup for each missing API key.
+
+If the phone will not open the page, or the page loads but cannot connect (some browsers refuse a WebSocket to a self-signed certificate), use a tunnel with a real certificate instead, and open the `https://…` URL it prints, adding `/phone`:
+
+```
+cloudflared tunnel --url https://localhost:8443 --no-tls-verify
+# or: ngrok http https://localhost:8443
+```
+
+## Demo notes
+
+The duplicate-footage check remembers frame hashes from every session in `data/hashes.json`. Before the real demo, clear the rehearsals so they cannot be matched:
+
+```
+scripts/run.sh --fresh       # or scripts/reset_data.sh, then scripts/run.sh
+```
 
 ## File mode
 

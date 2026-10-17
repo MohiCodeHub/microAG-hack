@@ -381,12 +381,14 @@ function renderSignals(s) {
 const watch = new Link(wsUrl("/ws/watch"));
 
 let connected = false;
-let session = "none"; // none | live | ended
+let session = "none"; // none | live | ending | ended
+let sessionId = null; // events from any other session are late leftovers and are ignored
 
 function renderConn() {
   const [state, text] = !connected ? ["down", "Reconnecting"]
     : session === "live" ? ["up", "Live"]
-      : session === "ended" ? ["idle", "Session ended"] : ["idle", "Ready"];
+      : session === "ending" ? ["idle", "Building the report"]
+        : session === "ended" ? ["idle", "Session ended"] : ["idle", "Ready"];
   $("conn").dataset.state = state;
   $("conn").textContent = text;
 }
@@ -394,7 +396,20 @@ function renderConn() {
 watch.on("link:open", () => { connected = true; renderConn(); });
 watch.on("link:close", () => { connected = false; renderConn(); });
 
-watch.on("session_started", async (ev) => {
+// Session events run one at a time, in arrival order, even when a handler awaits (the task
+// list may still be loading when session_started and the replayed chunks arrive).
+let queue = Promise.resolve();
+function onSession(type, fn) {
+  watch.on(type, (ev) => {
+    queue = queue.then(() => {
+      if (type === "session_started" || ev.session_id === sessionId) return fn(ev);
+      return undefined;
+    }).catch((e) => console.error(e));
+  });
+}
+
+onSession("session_started", async (ev) => {
+  sessionId = ev.session_id;
   session = "live";
   renderConn();
   if (!tasks.has(ev.task.id)) await loadTasks();
@@ -402,7 +417,7 @@ watch.on("session_started", async (ev) => {
   resetLive();
 });
 
-watch.on("frame", (ev) => {
+onSession("frame", (ev) => {
   lastFrameT = ev.t;
   const img = $("frame");
   img.src = `data:image/jpeg;base64,${ev.jpeg_b64}`;
@@ -411,16 +426,22 @@ watch.on("frame", (ev) => {
   $("clock").textContent = mmss(ev.t);
 });
 
-watch.on("chunk", (ev) => onChunk(ev.chunk, ev.signals));
-watch.on("monitor", (ev) => {
+onSession("chunk", (ev) => onChunk(ev.chunk, ev.signals));
+onSession("monitor", (ev) => {
+  if (ev.fallback) return; // the monitor call failed: keep the last real status and progress
   const d = ev.decision || {};
   setStatus(d);
   setStep(d.current_step, d.progress);
   setRisk(d.fraud_risk);
 });
-watch.on("agent_say", onAgentSay);
-watch.on("worker_said", onWorkerSaid);
-watch.on("report", (ev) => {
+onSession("agent_say", onAgentSay);
+onSession("worker_said", onWorkerSaid);
+onSession("session_ending", () => {
+  session = "ending";
+  renderConn();
+  $("frame-source").textContent = "Building the report…";
+});
+onSession("report", (ev) => {
   session = "ended";
   renderConn();
   renderReport(ev.report || {});
@@ -435,8 +456,11 @@ let file = null;     // {video, sampler, loop, stream, url}
 function fileLink() {
   if (source) return source;
   source = new Link(wsUrl("/ws/source"));
-  source.on("agent_say", (ev) => { if (file && file.loop) file.loop.handle(ev); });
-  source.on("report", () => endFile());
+  // Only events of this file's own session count; a late one from an earlier run is ignored.
+  const mine = (ev) => file && file.sessionId && ev.session_id === file.sessionId;
+  source.on("session_started", (ev) => { if (file && !file.sessionId) file.sessionId = ev.session_id; });
+  source.on("agent_say", (ev) => { if (mine(ev) && file.loop) file.loop.handle(ev); });
+  source.on("report", (ev) => { if (mine(ev)) endFile(); });
   source.on("error", (ev) => notice(ev.message || "The server reported an error."));
   source.on("link:close", () => {
     if (file) {
@@ -470,7 +494,7 @@ async function startFile() {
   const url = URL.createObjectURL(chosen);
   video.src = url;
   document.body.append(video);
-  file = { video, url, sampler: null, loop: null, stream: null };
+  file = { video, url, sampler: null, loop: null, stream: null, sessionId: null };
   setFileUi(true, chosen.name);
 
   try {

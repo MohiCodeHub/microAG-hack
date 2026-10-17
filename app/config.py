@@ -23,6 +23,7 @@ class Settings:
     question_min_interval_s: float = 60
     nudge_cooldown_s: float = 20
     answer_timeout_s: float = 20
+    finish_timeout_s: float = 25  # max wait for in-flight chunks before the report
 
 
 def get_settings() -> Settings:

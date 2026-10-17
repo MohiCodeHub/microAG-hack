@@ -91,8 +91,31 @@ async def test_monitor_default_on_bad_json():
     tl = Timeline()
     tl.add_chunk(mk(0))
     d = await LLM(fc, Settings()).monitor(TASK, [], tl, "chunk")
-    assert d == MonitorDecision.default()
+    assert d == MonitorDecision.unavailable()
+    assert d.fallback is True
     assert d.status == "ok" and d.wake is False and d.explained is None and d.question == ""
+
+
+async def test_parsed_monitor_decision_is_not_fallback():
+    fc = FakeClient(json.dumps(GOOD_DECISION))
+    tl = Timeline()
+    tl.add_chunk(mk(0))
+    assert (await LLM(fc, Settings()).monitor(TASK, [], tl, "chunk")).fallback is False
+
+
+async def test_monitor_prompt_explains_foreign_step_ids_and_latest_line_position():
+    fc = FakeClient(json.dumps(GOOD_DECISION))
+    tl = Timeline()
+    tl.add_chunk(mk(0, step="using_phone"))
+    tl.add_worker(9, "just checking the recipe")
+    await LLM(fc, Settings()).monitor(TASK, [], tl, "worker_answer")
+    call = fc.calls[0]
+    instructions = call["input"][0]["content"][0]["text"]
+    assert "not in the claimed task's step list" in instructions
+    assert "wrong_task" in instructions.split("not in the claimed task's step list")[1][:400]
+    latest = text_of(call).split("=== LATEST\n")[1]
+    assert "below" in latest.splitlines()[0] and "above" not in latest.splitlines()[0]
+    assert latest.splitlines()[1] == '00:09 WORKER: "just checking the recipe"'
 
 
 async def test_monitor_prompt_order_prefix_stable():

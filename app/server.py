@@ -8,7 +8,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +28,13 @@ from app.voice import Voice
 log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
-SOURCE_EVENTS = {"agent_say", "report", "error"}  # also delivered to the capture client
+# Also delivered to the capture client. session_started tells it its session id, so it can
+# ignore a late report or question from a session it already left.
+SOURCE_EVENTS = {"session_started", "agent_say", "report", "error"}
 WATCHER_QUEUE = 64  # events buffered per dashboard before it is considered stalled
+REPLAY_CHUNKS = 32  # chunks replayed to a dashboard that connects mid-session
 SEND_TIMEOUT_S = 5.0
+API_KEYS = {"OPENAI_API_KEY": "openai_api_key", "ELEVENLABS_API_KEY": "elevenlabs_api_key"}
 
 
 def default_llm_factory(settings: Settings) -> LLM:
@@ -42,6 +46,18 @@ def default_llm_factory(settings: Settings) -> LLM:
 def default_voice_factory(settings: Settings, http: httpx.AsyncClient) -> Voice:
     return Voice(settings.elevenlabs_api_key, settings.elevenlabs_voice_id, http,
                  stt_model=settings.elevenlabs_stt_model)
+
+
+def session_started_event(session: Session) -> dict:
+    return {"type": "session_started", "session_id": session.id,
+            "task": {"id": session.task.id, "name": session.task.name}}
+
+
+def warn_missing_keys(settings: Settings) -> None:
+    for env, attr in API_KEYS.items():
+        if not getattr(settings, attr):
+            log.warning("!!! %s is not set: every call that needs it will fail. "
+                        "Add it to .env and restart.", env)
 
 
 @dataclass
@@ -64,9 +80,18 @@ class Hub:
         self.watchers: dict[WebSocket, asyncio.Queue] = {}
         self._writers: dict[WebSocket, asyncio.Task] = {}
         self.active: Active | None = None
+        self.ending: Session | None = None  # session whose report is being built
 
     def add_watcher(self, ws: WebSocket) -> None:
         q: asyncio.Queue = asyncio.Queue(self.queue_size)
+        s = self.active.session if self.active else self.ending
+        if s:  # joined mid-session: give it the task and the timeline so far
+            q.put_nowait(session_started_event(s))
+            for c in s.timeline.chunks[-min(REPLAY_CHUNKS, self.queue_size // 2):]:
+                q.put_nowait({"type": "chunk", "chunk": asdict(c), "signals": {},
+                              "session_id": s.id})
+            if s is self.ending:
+                q.put_nowait({"type": "session_ending", "session_id": s.id})
         self.watchers[ws] = q
         self._writers[ws] = asyncio.create_task(self._write(ws, q))
 
@@ -97,6 +122,7 @@ class Hub:
         if a is None or (only_source is not None and a.source is not only_source):
             return
         self.active = None
+        self.ending = a.session
         if a.answers:
             results = await asyncio.gather(*a.answers, return_exceptions=True)
             for r in results:
@@ -107,6 +133,9 @@ class Hub:
         except Exception:  # noqa: BLE001
             log.exception("finish failed")
             await _send(a.source, {"type": "error", "message": "report generation failed"})
+        finally:
+            if self.ending is a.session:
+                self.ending = None
 
 
 async def _send(ws: WebSocket, event: dict, timeout: float = SEND_TIMEOUT_S) -> bool:
@@ -121,6 +150,7 @@ def create_app(settings: Settings,
                llm_factory: Callable[[Settings], Any] = default_llm_factory,
                voice_factory: Callable[[Settings, httpx.AsyncClient], Any] = default_voice_factory,
                ) -> FastAPI:
+    warn_missing_keys(settings)
     http = httpx.AsyncClient()
     hub = Hub()
     hashes = HashStore(Path(settings.data_dir) / "hashes.json")
@@ -171,20 +201,21 @@ def create_app(settings: Settings,
             await _send(ws, {"type": "error", "message": f"unknown task_id: {task_id}"})
             return
         await hub.end()
+        session_id = uuid.uuid4().hex[:8]
 
         async def emit(event: dict) -> None:
+            # Every event names its session, so clients can drop a late one from an old session.
+            event = {**event, "session_id": session_id}
             await hub.broadcast(event)
             if event.get("type") in SOURCE_EVENTS:
                 await _send(ws, event)
 
         session = Session(
-            uuid.uuid4().hex[:8], task, library,
-            load_reference_timelines(settings.tasks_dir, task.id),
+            session_id, task, library, load_reference_timelines(settings.tasks_dir, task.id),
             llm_factory(settings), voice_factory(settings, http), hashes, settings, emit,
         )
         hub.active = Active(session, ws)
-        await hub.broadcast({"type": "session_started", "session_id": session.id,
-                             "task": {"id": task.id, "name": task.name}})
+        await emit(session_started_event(session))
 
     async def handle(ws: WebSocket, msg: dict) -> None:
         kind = msg.get("type")

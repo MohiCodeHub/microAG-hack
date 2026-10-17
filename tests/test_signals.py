@@ -49,14 +49,34 @@ def test_imu_mismatch_false_without_imu():
     assert signals.imu_mismatch(0.5, None) is False
 
 
+def test_frame_hash_skips_low_texture_frames():
+    assert signals.frame_hash(_jpeg(120)) is None
+    assert signals.frame_hash(_pattern(1)) is not None
+
+
 def test_hashstore_matches_other_session_not_same(tmp_path):
     path = tmp_path / "sub" / "hashes.json"
     store = signals.HashStore(path)
-    f = _pattern(1)
-    assert store.check_and_add("s1", 1.0, f) == []
-    assert store.check_and_add("s1", 2.0, f) == []
-    matches = store.check_and_add("s2", 3.0, f)
-    assert len(matches) == 1
-    assert matches[0]["session_id"] == "s1"
+    h = signals.frame_hash(_pattern(1))
+    assert store.check_and_add("s1", 0, 1.0, h) == []
+    assert store.check_and_add("s1", 1, 2.0, h) == []
+    matches = store.check_and_add("s2", 0, 3.0, h)
+    assert matches == [{"session_id": "s1", "index": 0, "t": 1.0, "distance": 0}]
     store2 = signals.HashStore(path)
-    assert len(store2.check_and_add("s3", 4.0, f)) >= 1
+    assert len(store2.check_and_add("s3", 0, 4.0, h)) >= 1
+
+
+def test_hashstore_match_needs_near_identical_hash(tmp_path):
+    store = signals.HashStore(tmp_path / "hashes.json")
+    h = signals.frame_hash(_pattern(1))
+    flipped = h.hash.copy()
+    flipped.flat[:3] = ~flipped.flat[:3]  # 3 bits away
+    store.check_and_add("s1", 0, 1.0, h)
+    assert store.check_and_add("s2", 0, 1.0, type(h)(flipped)) == []
+
+
+def test_hashstore_ignores_entries_from_older_format(tmp_path):
+    path = tmp_path / "hashes.json"
+    h = signals.frame_hash(_pattern(1))
+    path.write_text('[{"session_id": "s0", "t": 1.0, "hash": "%s"}]' % h)
+    assert signals.HashStore(path).check_and_add("s1", 0, 2.0, h) == []

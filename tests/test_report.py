@@ -52,3 +52,13 @@ def test_fraud_score_blends_model_and_rule():
     assert r["fraud_score"] == round(0.5 * 61 + 0.5 * 20)
     assert r["divergences"] == [{"t": 10, "type": "idle", "reason": "r", "question": "q",
                                  "answer": "a", "explained": True}]
+
+
+def test_model_fraud_score_is_clamped_to_0_100():
+    stats = signal_stats([mk(0)], [], 0, 0)  # rule = 0
+    high = build_report({"segments": [], "fraud_score": 250, "verdict": "reject", "reasons": []},
+                        stats, [], "")
+    low = build_report({"segments": [], "fraud_score": -40, "verdict": "accept", "reasons": []},
+                       stats, [], "")
+    assert (high["model_fraud_score"], high["fraud_score"]) == (100, 50)
+    assert (low["model_fraud_score"], low["fraud_score"]) == (0, 0)

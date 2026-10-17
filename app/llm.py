@@ -36,11 +36,22 @@ class MonitorDecision:
     question: str
     fraud_risk: float
     explained: bool | None
+    fallback: bool = False  # True when the monitor call failed; not part of the model output
 
     @classmethod
     def default(cls) -> "MonitorDecision":
         return cls(current_step="", progress=0.0, status="ok", divergence_type="none",
                    reason="", wake=False, question="", fraud_risk=0.0, explained=None)
+
+    @classmethod
+    def unavailable(cls) -> "MonitorDecision":
+        """Neutral stand-in used when the monitor call fails."""
+        d = cls.default()
+        d.fallback = True
+        return d
+
+
+MODEL_FIELDS = [f.name for f in fields(MonitorDecision) if f.name != "fallback"]
 
 
 # ---------------------------------------------------------------- schemas
@@ -125,6 +136,11 @@ decide whether something is off. You never see video, only text.
 How to read the timelines:
 - Chunk line: `mm:ss–mm:ss caption [step_id]` - what the captioner saw in that 10 s window and \
 which step it mapped it to. Captions can be wrong or vague; one odd line is weak evidence.
+- The captioner picks step ids from a list that deliberately mixes in steps of OTHER tasks and \
+distractor activities. A step id not in the claimed task's step list (the CLAIMED TASK section) \
+means the captioner saw work from another task or something unrelated. One such line is weak \
+evidence; several in a row are strong evidence of wrong_task (the steps fit another task) or \
+off_script.
 - `mm:ss AGENT: "..."` is a question you (the agent) already asked the worker.
 - `mm:ss WORKER: "..."` is the worker's spoken answer. An answer is an explanation: if it \
 plausibly accounts for what was seen (e.g. "waiting for the kettle", "grabbing a clean cup"), \
@@ -208,7 +224,8 @@ def _references_block(references: list[str]) -> str:
 def _context_prefix(task: Task, references: list[str]) -> str:
     """Stable per-session prefix: task + reference timelines (for prompt caching)."""
     return (
-        f"=== CLAIMED TASK\n{task.name} ({task.id})\nSteps in order:\n{_steps_block(task.steps)}\n"
+        f"=== CLAIMED TASK\n{task.name} ({task.id})\n"
+        f"Steps in order (the only step ids that belong to this task):\n{_steps_block(task.steps)}\n"
         f"- other: something else\n\n"
         f"=== REFERENCE TIMELINES\n{_references_block(references)}\n\n"
     )
@@ -272,10 +289,10 @@ class LLM:
                       trigger: str) -> MonitorDecision:
         lines = timeline.render().splitlines()
         if trigger == "worker_answer":
-            latest = "The worker just answered your question (last WORKER line above). " \
+            latest = "The worker just answered your question (the WORKER line below). " \
                      "Judge `explained` and update your decision."
         else:
-            latest = "A new 10 s chunk was just added (last chunk line above). Update your decision."
+            latest = "A new 10 s chunk was just added (the chunk line below). Update your decision."
         text = (
             _context_prefix(task, references)
             + "=== SESSION TIMELINE (so far)\n" + "\n".join(lines[:-1]) + "\n\n"
@@ -287,10 +304,10 @@ class LLM:
                 self.settings.monitor_model, [_developer(MONITOR_INSTRUCTIONS), _user(text)],
                 "monitor_decision", _monitor_schema(step_ids),
             )
-            return MonitorDecision(**{f.name: data[f.name] for f in fields(MonitorDecision)})
+            return MonitorDecision(**{k: data[k] for k in MODEL_FIELDS})
         except Exception as e:  # noqa: BLE001
             log.warning("monitor failed: %r", e)
-            return MonitorDecision.default()
+            return MonitorDecision.unavailable()
 
     async def final_report(self, task: Task, references: list[str], timeline: Timeline) -> dict:
         text = (_context_prefix(task, references)
