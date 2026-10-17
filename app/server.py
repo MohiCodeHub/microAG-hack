@@ -1,0 +1,200 @@
+"""FastAPI server: pages, task API, and the source / watch WebSocket protocol."""
+from __future__ import annotations
+
+import asyncio
+import base64
+import logging
+import uuid
+from collections.abc import Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import httpx
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from openai import AsyncOpenAI
+
+from app.config import Settings, get_settings
+from app.llm import LLM
+from app.session import Session
+from app.signals import HashStore
+from app.tasks import load_library, load_reference_timelines
+from app.voice import Voice
+
+log = logging.getLogger(__name__)
+
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+SOURCE_EVENTS = {"agent_say", "report", "error"}  # also delivered to the capture client
+
+
+def default_llm_factory(settings: Settings) -> LLM:
+    # max_retries=0 so llm_timeout_s is the real upper bound per call.
+    client = AsyncOpenAI(api_key=settings.openai_api_key or "missing", max_retries=0)
+    return LLM(client, settings)
+
+
+def default_voice_factory(settings: Settings, http: httpx.AsyncClient) -> Voice:
+    return Voice(settings.elevenlabs_api_key, settings.elevenlabs_voice_id, http,
+                 stt_model=settings.elevenlabs_stt_model)
+
+
+@dataclass
+class Active:
+    session: Session
+    source: WebSocket
+    answers: list[asyncio.Task] = field(default_factory=list)
+
+
+class Hub:
+    """Tracks dashboards and the single active session."""
+
+    def __init__(self) -> None:
+        self.watchers: set[WebSocket] = set()
+        self.active: Active | None = None
+
+    async def broadcast(self, event: dict) -> None:
+        for ws in list(self.watchers):
+            if not await _send(ws, event):
+                self.watchers.discard(ws)
+
+    async def end(self, only_source: WebSocket | None = None) -> None:
+        """Finish the active session (optionally only if owned by `only_source`)."""
+        a = self.active
+        if a is None or (only_source is not None and a.source is not only_source):
+            return
+        self.active = None
+        if a.answers:
+            await asyncio.gather(*a.answers, return_exceptions=True)
+        try:
+            await a.session.finish()
+        except Exception:  # noqa: BLE001
+            log.exception("finish failed")
+            await _send(a.source, {"type": "error", "message": "report generation failed"})
+
+
+async def _send(ws: WebSocket, event: dict) -> bool:
+    try:
+        await ws.send_json(event)
+        return True
+    except Exception:  # noqa: BLE001 - closed / dead socket
+        return False
+
+
+def create_app(settings: Settings,
+               llm_factory: Callable[[Settings], Any] = default_llm_factory,
+               voice_factory: Callable[[Settings, httpx.AsyncClient], Any] = default_voice_factory,
+               ) -> FastAPI:
+    http = httpx.AsyncClient()
+    hub = Hub()
+    hashes = HashStore(Path(settings.data_dir) / "hashes.json")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        await hub.end()
+        await http.aclose()
+
+    app = FastAPI(lifespan=lifespan)
+    app.state.hub = hub
+
+    @app.get("/")
+    def dashboard() -> FileResponse:
+        return FileResponse(STATIC_DIR / "dashboard.html")
+
+    @app.get("/phone")
+    def phone() -> FileResponse:
+        return FileResponse(STATIC_DIR / "phone.html")
+
+    @app.get("/api/tasks")
+    def tasks() -> list[dict]:
+        lib = load_library(settings.tasks_dir)
+        return [
+            {"id": t.id, "name": t.name,
+             "steps": [{"id": s.id, "label": s.label} for s in t.steps],
+             "reference_count": len(load_reference_timelines(settings.tasks_dir, t.id))}
+            for t in lib.values()
+        ]
+
+    @app.websocket("/ws/watch")
+    async def ws_watch(ws: WebSocket) -> None:
+        await ws.accept()
+        hub.watchers.add(ws)
+        try:
+            while True:
+                await ws.receive_text()  # ignore input; detects disconnect
+        except WebSocketDisconnect:
+            pass
+        finally:
+            hub.watchers.discard(ws)
+
+    async def start_session(ws: WebSocket, task_id: Any) -> None:
+        library = load_library(settings.tasks_dir)
+        task = library.get(task_id) if isinstance(task_id, str) else None
+        if task is None:
+            await _send(ws, {"type": "error", "message": f"unknown task_id: {task_id}"})
+            return
+        await hub.end()
+
+        async def emit(event: dict) -> None:
+            await hub.broadcast(event)
+            if event.get("type") in SOURCE_EVENTS:
+                await _send(ws, event)
+
+        session = Session(
+            uuid.uuid4().hex[:8], task, library,
+            load_reference_timelines(settings.tasks_dir, task.id),
+            llm_factory(settings), voice_factory(settings, http), hashes, settings, emit,
+        )
+        hub.active = Active(session, ws)
+        await hub.broadcast({"type": "session_started", "session_id": session.id,
+                             "task": {"id": task.id, "name": task.name}})
+
+    async def handle(ws: WebSocket, msg: dict) -> None:
+        kind = msg.get("type")
+        if kind == "start":
+            await start_session(ws, msg.get("task_id"))
+            return
+        a = hub.active
+        if kind == "stop":
+            await hub.end(only_source=ws)
+            return
+        if a is None or a.source is not ws:
+            await _send(ws, {"type": "error", "message": "no active session; send start first"})
+            return
+        if kind == "frame":
+            await a.session.add_frame(float(msg["t"]), base64.b64decode(msg["jpeg_b64"]))
+        elif kind == "imu":
+            a.session.add_imu(msg.get("samples", []))
+        elif kind == "answer":
+            audio = base64.b64decode(msg["audio_b64"])
+            a.answers.append(asyncio.create_task(
+                a.session.add_answer(audio, msg.get("mime", "audio/webm"))))
+        else:
+            await _send(ws, {"type": "error", "message": f"unknown message type: {kind}"})
+
+    @app.websocket("/ws/source")
+    async def ws_source(ws: WebSocket) -> None:
+        await ws.accept()
+        try:
+            while True:
+                msg = await ws.receive_json()
+                try:
+                    await handle(ws, msg)
+                except WebSocketDisconnect:
+                    raise
+                except Exception as e:  # noqa: BLE001 - a bad message must not drop the stream
+                    log.warning("bad source message: %r", e)
+                    await _send(ws, {"type": "error", "message": f"bad message: {e}"})
+        except WebSocketDisconnect:
+            pass
+        finally:
+            await hub.end(only_source=ws)
+
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    return app
+
+
+app = create_app(get_settings())
