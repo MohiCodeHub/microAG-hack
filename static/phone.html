@@ -1,1 +1,38 @@
-<!doctype html><title>Phone</title><h1>Phone</h1>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#131c27">
+  <title>Shift capture</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Next:wght@400;500;700&display=swap">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="phone">
+  <main class="phone-shell">
+    <div class="phone-preview">
+      <video id="preview" autoplay muted playsinline></video>
+      <p class="phone-preview-empty" id="preview-empty">The camera turns on when you start.</p>
+      <span class="phone-rec" id="rec" hidden>Recording <span id="clock">00:00</span></span>
+    </div>
+
+    <label class="phone-field">
+      <span>Task</span>
+      <select id="task" disabled><option>Loading tasks…</option></select>
+    </label>
+
+    <p class="phone-status" id="status" role="status">Pick a task, then press Start.</p>
+    <p class="phone-error" id="error" role="alert" hidden></p>
+
+    <section class="phone-agent" id="agent" hidden aria-live="polite">
+      <p class="phone-agent-who" id="agent-who">Agent</p>
+      <p class="phone-agent-text" id="agent-text"></p>
+    </section>
+
+    <button class="phone-go" id="go" type="button" disabled>Start</button>
+  </main>
+  <script type="module" src="/static/phone.js"></script>
+</body>
+</html>
