@@ -1,0 +1,12 @@
+{
+  "id": "example_make_tea",
+  "name": "Make a cup of tea",
+  "steps": [
+    {"id": "fill_kettle", "label": "Fill the kettle with water"},
+    {"id": "boil", "label": "Boil the water"},
+    {"id": "cup_teabag", "label": "Put a teabag in a cup"},
+    {"id": "pour", "label": "Pour hot water into the cup"},
+    {"id": "steep_remove", "label": "Steep, then remove the teabag"},
+    {"id": "add_milk", "label": "Add milk"}
+  ]
+}

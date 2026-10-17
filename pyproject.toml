@@ -1,0 +1,27 @@
+[project]
+name = "microag-hack"
+version = "0.1.0"
+description = "Live annotation and fraud voice agent"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "openai",
+    "httpx",
+    "python-dotenv",
+    "pillow",
+    "imagehash",
+    "numpy",
+    "av",
+]
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.uv]
+package = false
