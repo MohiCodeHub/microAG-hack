@@ -17,10 +17,10 @@ class Settings:
     monitor_model: str = "gpt-5.6-luna"
     tasks_dir: Path = field(default_factory=lambda: Path("tasks"))
     data_dir: Path = field(default_factory=lambda: Path("data"))
-    chunk_frames: int = 10
+    chunk_frames: int = 5
     llm_timeout_s: float = 20
-    question_cooldown_s: float = 45
-    question_min_interval_s: float = 60
+    question_cooldown_s: float = 25
+    question_min_interval_s: float = 25
     nudge_cooldown_s: float = 20
     answer_timeout_s: float = 20
     finish_timeout_s: float = 25  # max wait for in-flight chunks before the report

@@ -6,7 +6,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from app.config import Settings
+from app.config import Settings  # noqa: F401
+from tests.legacy_settings import LegacySettings
 from app.llm import CAPTION_FALLBACK, MonitorDecision
 from app.session import NUDGE_TEXT, Session
 from app.signals import HashStore, frame_hash
@@ -102,7 +103,7 @@ class Harness:
 
         self.session = Session(
             session_id, TASK, {"tea": TASK}, ["ref timeline"], self.llm, self.voice,
-            hashes or HashStore(tmp_path / "hashes.json"), settings or Settings(), emit,
+            hashes or HashStore(tmp_path / "hashes.json"), settings or LegacySettings(), emit,
             clock=self.clock,
         )
         self.t = 0
@@ -262,7 +263,7 @@ async def test_empty_stt_records_no_answer(tmp_path):
 
 
 async def test_answer_timeout_marks_unexplained(tmp_path):
-    settings = Settings(answer_timeout_s=0.05)
+    settings = LegacySettings(answer_timeout_s=0.05)
     h = Harness(tmp_path, llm=waking_llm(), settings=settings)
     await h.chunk()
     assert h.session.pending
@@ -401,7 +402,7 @@ async def test_finish_is_bounded_when_a_caption_hangs(tmp_path):
             await hang.wait()  # never set
         return cap()
 
-    h = Harness(tmp_path, llm=FakeLLM(caption=caption), settings=Settings(finish_timeout_s=0.2))
+    h = Harness(tmp_path, llm=FakeLLM(caption=caption), settings=LegacySettings(finish_timeout_s=0.2))
     await h.chunk()
     for t in range(10, 20):
         await h.session.add_frame(float(t), GRAY)

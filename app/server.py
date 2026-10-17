@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from openai import AsyncOpenAI
 
 from app.config import Settings, get_settings
+from app.eventlog import SessionLog
 from app.llm import LLM
 from app.session import Session
 from app.signals import HashStore
@@ -53,6 +54,25 @@ def session_started_event(session: Session) -> dict:
             "task": {"id": session.task.id, "name": session.task.name}}
 
 
+def _log_event(event: dict) -> None:
+    """One terminal line per interesting event, so a live run can be followed in the log."""
+    kind = event.get("type")
+    if kind == "chunk":
+        c = event.get("chunk", {})
+        log.info("chunk %s %.0f-%.0fs [%s] hands=%s %s", c.get("index"), c.get("t_start", 0),
+                 c.get("t_end", 0), c.get("step"), c.get("hands_visible"), c.get("caption"))
+    elif kind == "monitor":
+        d = event.get("decision", {})
+        log.info("monitor status=%s type=%s wake=%s q=%r fallback=%s reason=%s",
+                 d.get("status"), d.get("divergence_type"), d.get("wake"), d.get("question"),
+                 event.get("fallback"), d.get("reason"))
+    elif kind == "agent_say":
+        log.info("agent_say %s audio=%s %r", event.get("kind"),
+                 "yes" if event.get("audio_b64") else "NONE", event.get("text"))
+    elif kind in ("worker_said", "session_ending", "report", "error"):
+        log.info("%s %s", kind, event.get("text") or event.get("message") or "")
+
+
 def warn_missing_keys(settings: Settings) -> None:
     for env, attr in API_KEYS.items():
         if not getattr(settings, attr):
@@ -65,6 +85,7 @@ class Active:
     session: Session
     source: WebSocket
     answers: list[asyncio.Task] = field(default_factory=list)
+    log: SessionLog | None = None
 
 
 class Hub:
@@ -136,6 +157,8 @@ class Hub:
         finally:
             if self.ending is a.session:
                 self.ending = None
+            if a.log:
+                a.log.close()
 
 
 async def _send(ws: WebSocket, event: dict, timeout: float = SEND_TIMEOUT_S) -> bool:
@@ -150,6 +173,12 @@ def create_app(settings: Settings,
                llm_factory: Callable[[Settings], Any] = default_llm_factory,
                voice_factory: Callable[[Settings, httpx.AsyncClient], Any] = default_voice_factory,
                ) -> FastAPI:
+    app_log = logging.getLogger("app")
+    if not app_log.handlers:  # uvicorn only configures its own loggers
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", "%H:%M:%S"))
+        app_log.addHandler(h)
+        app_log.setLevel(logging.INFO)
     warn_missing_keys(settings)
     http = httpx.AsyncClient()
     hub = Hub()
@@ -163,6 +192,14 @@ def create_app(settings: Settings,
 
     app = FastAPI(lifespan=lifespan)
     app.state.hub = hub
+
+    @app.middleware("http")
+    async def no_cache(request, call_next):
+        # Phones otherwise keep serving stale page code after an edit.
+        response = await call_next(request)
+        if request.url.path in ("/", "/phone") or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
 
     @app.get("/")
     def dashboard() -> FileResponse:
@@ -202,31 +239,45 @@ def create_app(settings: Settings,
             return
         await hub.end()
         session_id = uuid.uuid4().hex[:8]
+        slog = SessionLog(settings.data_dir / "logs" / f"{session_id}.jsonl")
+        log.info("session %s started (task %s); debug log %s", session_id, task.id, slog.path)
 
         async def emit(event: dict) -> None:
             # Every event names its session, so clients can drop a late one from an old session.
             event = {**event, "session_id": session_id}
+            slog.write("emit", event)
+            _log_event(event)
             await hub.broadcast(event)
             if event.get("type") in SOURCE_EVENTS:
-                await _send(ws, event)
+                ok = await _send(ws, event)
+                if not ok:
+                    slog.write("emit_to_source_failed", {"type": event.get("type")})
 
         session = Session(
             session_id, task, library, load_reference_timelines(settings.tasks_dir, task.id),
             llm_factory(settings), voice_factory(settings, http), hashes, settings, emit,
         )
-        hub.active = Active(session, ws)
+        hub.active = Active(session, ws, log=slog)
         await emit(session_started_event(session))
 
     async def handle(ws: WebSocket, msg: dict) -> None:
         kind = msg.get("type")
+        a = hub.active
+        if a and a.log and a.source is ws:
+            a.log.write("recv", msg)
+        if kind == "client_log":
+            if not (a and a.source is ws):
+                log.info("client_log (no session): %s", {k: v for k, v in msg.items() if k != "type"})
+            return
         if kind == "start":
             await start_session(ws, msg.get("task_id"))
             return
-        a = hub.active
         if kind == "stop":
             await hub.end(only_source=ws)
             return
         if a is None or a.source is not ws:
+            log.warning("%s from a socket that does not own the active session (active: %s)",
+                        kind, a.session.id if a else None)
             await _send(ws, {"type": "error", "message": "no active session; send start first"})
             return
         if kind == "frame":

@@ -21,7 +21,7 @@ from app.llm import CAPTION_FALLBACK, LLM  # noqa: E402
 from app.tasks import candidate_steps, load_library  # noqa: E402
 from app.timeline import Chunk, Timeline, fmt  # noqa: E402
 
-CHUNK_FRAMES = 10
+CHUNK_FRAMES = 5  # keep equal to Settings.chunk_frames so references match live chunks
 MIN_PARTIAL_FRAMES = 3
 
 

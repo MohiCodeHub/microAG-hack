@@ -26,11 +26,16 @@ let sessionId = null; // the session this phone started; events of any other are
 
 function setStatus(text) { els.status.textContent = text; }
 
+/** Debug report to the laptop's session log (data/logs/<session>.jsonl). */
+function clog(event, detail = {}) {
+  try { link.send("client_log", { event, state, ...detail }); } catch { /* never break capture */ }
+}
+
 function showError(err) {
   const msg = err instanceof Error ? err.message : String(err);
   els.error.textContent = msg;
   els.error.hidden = !msg;
-  if (msg) console.error(err);
+  if (msg) { console.error(err); clog("error_shown", { message: msg }); }
 }
 
 function setButton() {
@@ -100,6 +105,7 @@ async function start() {
     await els.video.play().catch(() => {});
     els.empty.hidden = true;
     await unlocking;
+    clog("audio_unlocked", { context: voice.context ? voice.context.state : "none" });
 
     motionOn = await motion;
     if (motionOn) imu.start();
@@ -113,8 +119,12 @@ async function start() {
     loop = new AgentVoiceLoop({
       voice,
       recorder: new AnswerRecorder(stream, voice.context),
-      onAnswer: (a) => link.send("answer", { audio_b64: a.audioB64, mime: a.mime }),
+      onAnswer: (a) => {
+        const sent = link.send("answer", { audio_b64: a.audioB64, mime: a.mime });
+        clog("answer_recorded", { mime: a.mime, b64_chars: a.audioB64.length, sent });
+      },
       onState: (s) => {
+        clog("voice_state", { voice_state: s });
         if (state !== "recording") return;
         if (s === "speaking") setStatus("Agent is speaking…");
         else if (s === "listening") setStatus("Listening for your answer…");
@@ -216,6 +226,8 @@ link.on("session_started", (ev) => {
 });
 
 link.on("agent_say", (ev) => {
+  clog("agent_say_received", { kind: ev.kind, has_audio: !!ev.audio_b64,
+    ev_session: ev.session_id, my_session: sessionId });
   if (state !== "recording" || ev.session_id !== sessionId) return;
   showAgent(ev.kind === "question" ? "Agent asks" : "Agent", ev.text);
   if (loop) loop.handle(ev);

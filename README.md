@@ -1,6 +1,6 @@
 # microAG-hack
 
-A live voice agent for egocentric work video. It captions the worker's camera feed in 10 s chunks, compares the session against reference timelines of the same task, and asks a short spoken question when something looks off. At the end it produces a segmented report with a verdict.
+A live voice agent for egocentric work video. It captions the worker's camera feed in 5 s chunks, compares the session against reference timelines of the same task, and asks a short spoken question when something looks off. At the end it produces a segmented report with a verdict.
 
 ## Setup
 

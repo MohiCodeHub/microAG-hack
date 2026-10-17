@@ -13,7 +13,7 @@ from app.timeline import Timeline, fmt
 log = logging.getLogger(__name__)
 
 # Passed to every responses.create call. Set to None if a model rejects it.
-REASONING: dict | None = {"effort": "low"}
+REASONING: dict | None = {"effort": "none"}  # "low" adds ~1 s per call
 
 CaptionResult = dict
 
@@ -170,10 +170,13 @@ wrong_task.
 
 Status:
 - ok: consistent with the task and references.
-- watch: something looks a bit off but could be normal. ALWAYS prefer watch the first time you \
-notice something; give it another chunk.
-- diverge: the problem has persisted or is unambiguous (e.g. repeated recapture tags, a clearly \
-different task for 20 s+).
+- watch: something looks a bit off but could be normal. For LOW-severity issues (idle, padding, \
+out_of_order, a single ambiguous off_script line) prefer watch the first time; give it another chunk.
+- diverge: the problem has persisted or is unambiguous. HIGH-severity issues go straight to \
+diverge on the first clear chunk, without a watch first: wrong_task (the activity clearly matches \
+a different task or the claimed task's objects are absent while other work happens), recapture \
+(screen, duplicate or motion-mismatch tags together with no real task activity), or clearly \
+unrelated activity. Chunks are about 5 s long.
 
 Interrupting the worker is costly; interrupt RARELY. Set wake=true only when status is diverge, the \
 divergence is not already explained by a WORKER line, and you have not just asked about the same \

@@ -6,7 +6,8 @@ import numpy as np
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from app.config import Settings
+from app.config import Settings  # noqa: F401
+from tests.legacy_settings import LegacySettings
 from app.llm import MonitorDecision
 from app.server import Hub, create_app
 
@@ -42,7 +43,7 @@ class FakeVoice:
 
 
 def make_client(tmp_path):
-    settings = Settings(data_dir=tmp_path / "data")
+    settings = LegacySettings(data_dir=tmp_path / "data")
     app = create_app(settings, llm_factory=lambda s: FakeLLM(),
                      voice_factory=lambda s, http: FakeVoice())
     return TestClient(app)
@@ -62,6 +63,13 @@ def test_pages_are_served(tmp_path):
         assert "/static/dashboard.js" in c.get("/").text
         assert "/static/phone.js" in c.get("/phone").text
         assert c.get("/static/phone.html").status_code == 200
+
+
+def test_pages_and_static_files_are_not_cached(tmp_path):
+    with make_client(tmp_path) as c:
+        for path in ("/", "/phone", "/static/phone.js", "/static/capture.js"):
+            assert "no-cache" in c.get(path).headers.get("cache-control", ""), path
+        assert "no-cache" not in c.get("/api/tasks").headers.get("cache-control", "")
 
 
 def test_source_ws_start_frames_produce_chunk_on_watch(tmp_path):
@@ -125,7 +133,7 @@ class SlowReportLLM(FakeLLM):
 
 
 def test_watcher_joining_while_the_report_is_built_still_gets_it(tmp_path):
-    app = create_app(Settings(data_dir=tmp_path / "data"), llm_factory=lambda s: SlowReportLLM(),
+    app = create_app(LegacySettings(data_dir=tmp_path / "data"), llm_factory=lambda s: SlowReportLLM(),
                      voice_factory=lambda s, http: FakeVoice())
     with TestClient(app) as c, c.websocket_connect("/ws/source") as src:
         src.send_json({"type": "start", "task_id": "example_make_tea"})
@@ -142,12 +150,12 @@ def test_watcher_joining_while_the_report_is_built_still_gets_it(tmp_path):
 
 def test_missing_api_keys_are_logged_at_startup(tmp_path, caplog):
     with caplog.at_level("WARNING", logger="app.server"):
-        create_app(Settings(data_dir=tmp_path / "data"))
+        create_app(LegacySettings(data_dir=tmp_path / "data"))
     text = caplog.text
     assert "OPENAI_API_KEY" in text and "ELEVENLABS_API_KEY" in text
     caplog.clear()
     with caplog.at_level("WARNING", logger="app.server"):
-        create_app(Settings(data_dir=tmp_path / "data", openai_api_key="k",
+        create_app(LegacySettings(data_dir=tmp_path / "data", openai_api_key="k",
                             elevenlabs_api_key="k"))
     assert "API_KEY" not in caplog.text
 
