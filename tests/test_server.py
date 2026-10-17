@@ -59,7 +59,7 @@ def test_tasks_endpoint_lists_example_task(tmp_path):
 
 def test_pages_are_served(tmp_path):
     with make_client(tmp_path) as c:
-        assert "Dashboard" in c.get("/").text
+        assert "/static/dashboard.js" in c.get("/").text
         assert "/static/phone.js" in c.get("/phone").text
         assert c.get("/static/phone.html").status_code == 200
 
