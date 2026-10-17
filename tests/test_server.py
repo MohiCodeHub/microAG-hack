@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import io
 
@@ -7,7 +8,7 @@ from PIL import Image
 
 from app.config import Settings
 from app.llm import MonitorDecision
-from app.server import create_app
+from app.server import Hub, create_app
 
 CAP = {"caption": "fills kettle", "step": "fill_kettle", "confidence": 0.9, "objects": ["kettle"],
        "hands_visible": "both", "activity": "active", "recapture_suspected": False}
@@ -122,3 +123,44 @@ def test_dead_watcher_does_not_break_session(tmp_path):
         src.send_json({"type": "start", "task_id": "example_make_tea"})
         src.send_json({"type": "stop"})
         assert src.receive_json()["type"] == "report"
+
+
+class SlowWS:
+    async def send_json(self, event):
+        await asyncio.sleep(3600)
+
+
+def test_stalled_watcher_does_not_block_session(tmp_path):
+    with make_client(tmp_path) as c, c.websocket_connect("/ws/watch") as watch, \
+            c.websocket_connect("/ws/source") as src:
+        c.portal.call(c.app.state.hub.add_watcher, SlowWS())
+        src.send_json({"type": "start", "task_id": "example_make_tea"})
+        for t in range(10):
+            src.send_json({"type": "frame", "t": t, "jpeg_b64": jpeg_b64()})
+        types = [watch.receive_json()["type"] for _ in range(12)]
+        assert types[-1] == "chunk"
+
+
+async def test_hub_drops_watcher_whose_queue_is_full():
+    hub = Hub(queue_size=2)
+    ws = SlowWS()
+    hub.add_watcher(ws)
+    for i in range(10):
+        await hub.broadcast({"type": "frame", "i": i})
+    assert ws not in hub.watchers
+
+
+def test_invalid_json_and_binary_do_not_end_session(tmp_path):
+    with make_client(tmp_path) as c, c.websocket_connect("/ws/watch") as watch, \
+            c.websocket_connect("/ws/source") as src:
+        src.send_json({"type": "start", "task_id": "example_make_tea"})
+        src.send_text("not json")
+        assert src.receive_json()["type"] == "error"
+        src.send_bytes(b"\x00\x01")
+        assert src.receive_json()["type"] == "error"
+        src.send_text("[1]")
+        assert src.receive_json()["type"] == "error"
+        for t in range(10):
+            src.send_json({"type": "frame", "t": t, "jpeg_b64": jpeg_b64()})
+        types = [watch.receive_json()["type"] for _ in range(12)]
+        assert types[-1] == "chunk"

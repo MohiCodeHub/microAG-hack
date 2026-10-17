@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import uuid
 from collections.abc import Callable
@@ -28,6 +29,8 @@ log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 SOURCE_EVENTS = {"agent_say", "report", "error"}  # also delivered to the capture client
+WATCHER_QUEUE = 64  # events buffered per dashboard before it is considered stalled
+SEND_TIMEOUT_S = 5.0
 
 
 def default_llm_factory(settings: Settings) -> LLM:
@@ -49,16 +52,44 @@ class Active:
 
 
 class Hub:
-    """Tracks dashboards and the single active session."""
+    """Tracks dashboards and the single active session.
 
-    def __init__(self) -> None:
-        self.watchers: set[WebSocket] = set()
+    Each dashboard gets a bounded queue and a writer task, so a slow or stalled dashboard can
+    never block the session's emit path; one whose queue fills (or whose send times out) is
+    dropped.
+    """
+
+    def __init__(self, queue_size: int = WATCHER_QUEUE) -> None:
+        self.queue_size = queue_size
+        self.watchers: dict[WebSocket, asyncio.Queue] = {}
+        self._writers: dict[WebSocket, asyncio.Task] = {}
         self.active: Active | None = None
 
+    def add_watcher(self, ws: WebSocket) -> None:
+        q: asyncio.Queue = asyncio.Queue(self.queue_size)
+        self.watchers[ws] = q
+        self._writers[ws] = asyncio.create_task(self._write(ws, q))
+
+    def remove_watcher(self, ws: WebSocket) -> None:
+        self.watchers.pop(ws, None)
+        w = self._writers.pop(ws, None)
+        if w and w is not asyncio.current_task():
+            w.cancel()
+
+    async def _write(self, ws: WebSocket, q: asyncio.Queue) -> None:
+        while True:
+            event = await q.get()
+            if not await _send(ws, event, SEND_TIMEOUT_S):
+                self.remove_watcher(ws)
+                return
+
     async def broadcast(self, event: dict) -> None:
-        for ws in list(self.watchers):
-            if not await _send(ws, event):
-                self.watchers.discard(ws)
+        for ws, q in list(self.watchers.items()):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                log.warning("dropping stalled dashboard")
+                self.remove_watcher(ws)
 
     async def end(self, only_source: WebSocket | None = None) -> None:
         """Finish the active session (optionally only if owned by `only_source`)."""
@@ -67,7 +98,10 @@ class Hub:
             return
         self.active = None
         if a.answers:
-            await asyncio.gather(*a.answers, return_exceptions=True)
+            results = await asyncio.gather(*a.answers, return_exceptions=True)
+            for r in results:
+                if isinstance(r, BaseException):
+                    log.warning("answer processing failed: %r", r)
         try:
             await a.session.finish()
         except Exception:  # noqa: BLE001
@@ -75,11 +109,11 @@ class Hub:
             await _send(a.source, {"type": "error", "message": "report generation failed"})
 
 
-async def _send(ws: WebSocket, event: dict) -> bool:
+async def _send(ws: WebSocket, event: dict, timeout: float = SEND_TIMEOUT_S) -> bool:
     try:
-        await ws.send_json(event)
+        await asyncio.wait_for(ws.send_json(event), timeout)
         return True
-    except Exception:  # noqa: BLE001 - closed / dead socket
+    except Exception:  # noqa: BLE001 - closed / dead / stalled socket (incl. timeout)
         return False
 
 
@@ -121,14 +155,14 @@ def create_app(settings: Settings,
     @app.websocket("/ws/watch")
     async def ws_watch(ws: WebSocket) -> None:
         await ws.accept()
-        hub.watchers.add(ws)
+        hub.add_watcher(ws)
         try:
             while True:
                 await ws.receive_text()  # ignore input; detects disconnect
         except WebSocketDisconnect:
             pass
         finally:
-            hub.watchers.discard(ws)
+            hub.remove_watcher(ws)
 
     async def start_session(ws: WebSocket, task_id: Any) -> None:
         library = load_library(settings.tasks_dir)
@@ -180,8 +214,13 @@ def create_app(settings: Settings,
         await ws.accept()
         try:
             while True:
-                msg = await ws.receive_json()
+                raw = await ws.receive()
+                if raw["type"] == "websocket.disconnect":
+                    break
                 try:
+                    msg = json.loads(raw.get("text") or "")
+                    if not isinstance(msg, dict):
+                        raise ValueError("message must be a JSON object")
                     await handle(ws, msg)
                 except WebSocketDisconnect:
                     raise
