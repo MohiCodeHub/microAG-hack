@@ -48,3 +48,24 @@ def test_group_chunks_keeps_partial_only_if_three_frames():
     fr = [(float(i), b"x") for i in range(23)]
     assert [len(c) for c in build_refs.group_chunks(fr)] == [10, 10, 3]
     assert [len(c) for c in build_refs.group_chunks(fr[:22])] == [10, 10]
+
+
+async def test_build_timeline_spans_and_prev_caption():
+    from app.tasks import Step, Task
+
+    class StubLLM:
+        def __init__(self):
+            self.prevs = []
+
+        async def caption(self, jpegs, task, steps, prev):
+            self.prevs.append(prev)
+            return {"caption": f"c{len(self.prevs)}", "step": "other", "confidence": 1.0,
+                    "objects": [], "hands_visible": "both", "activity": "active",
+                    "recapture_suspected": False}
+
+    llm = StubLLM()
+    frames = [(float(i), b"x") for i in range(23)]
+    tl = await build_refs.build_timeline(llm, Task("t", "T"), [Step("other", "o")], frames)
+    assert [(c.t_start, c.t_end) for c in tl.chunks] == [(0.0, 10.0), (10.0, 20.0), (20.0, 23.0)]
+    assert llm.prevs == [None, "c1", "c2"]
+    assert tl.render().splitlines()[0].startswith("00:00–00:10 ")

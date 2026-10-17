@@ -65,7 +65,7 @@ async def build_timeline(llm: LLM, task, steps, frames) -> Timeline:
     for i, group in enumerate(group_chunks(frames)):
         res = await llm.caption([j for _, j in group], task, steps, prev)
         prev = res["caption"]
-        tl.add_chunk(Chunk(index=i, t_start=group[0][0], t_end=group[-1][0], **res))
+        tl.add_chunk(Chunk(index=i, t_start=group[0][0], t_end=group[-1][0] + 1.0, **res))
     return tl
 
 
@@ -80,7 +80,9 @@ async def run(task_id: str, force: bool, tasks_dir: Path) -> None:
     task = library[task_id]
     steps = candidate_steps(task, library)
     settings = get_settings()
-    llm = LLM(AsyncOpenAI(api_key=settings.openai_api_key or "missing", max_retries=0), settings)
+    if not settings.openai_api_key:
+        raise SystemExit("OPENAI_API_KEY is not set; add it to .env")
+    llm = LLM(AsyncOpenAI(api_key=settings.openai_api_key, max_retries=0), settings)
 
     for v in videos:
         out = v.with_suffix(".timeline.json")
